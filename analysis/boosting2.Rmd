@@ -1,0 +1,864 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# setup
+
+```{r}
+library(gpboost)
+library(dplyr)
+library(ggplot2)
+```
+
+
+# boosting.R
+
+```{r}
+#--------------------Simulate data----------------
+# Non-linear function for simulation
+f1d <- function(x) 1.7*(1/(1+exp(-(x-0.5)*20))+0.75*x)
+x <- seq(from=0,to=1,length.out=200)
+plot(x,f1d(x),type="l",lwd=2,col="red",main="Mean function")
+
+# Function that simulates data. Two covariates of which only one has an effect
+sim_data <- function(n){
+  X=matrix(runif(2*n),ncol=2)
+  # mean function plus noise
+  y=f1d(X[,1])+rnorm(n,sd=0.1)
+  return(list(X=X,y=y))
+}
+
+# Simulate data
+n <- 1000
+set.seed(1)
+data <- sim_data(2 * n)
+Xtrain <- data$X[1:n,]
+ytrain <- data$y[1:n]
+Xtest <- data$X[1:n + n,]
+ytest <- data$y[1:n + n]
+```
+
+
+```{r}
+str(Xtrain)
+str(Xtest)
+```
+
+
+```{r}
+#--------------------Basic training using gpboost----------------
+print("Train boosting model")
+bst <- gpboost(data = Xtrain,
+               label = ytrain,
+               nrounds = 40,
+               learning_rate = 0.1,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 0)
+```
+
+
+```{r}
+# You can also use an gpb.Dataset object, which stores label, data and other meta datas needed for advanced features
+print("Training with gpb.Dataset")
+dtrain <- gpb.Dataset(data = Xtrain, label = ytrain)
+bst <- gpboost(data = dtrain,
+               nrounds = 40,
+               learning_rate = 0.1,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 0)
+```
+
+
+```{r}
+# Same thing using the gpb.train function
+print("Training with gpb.train")
+dtrain <- gpb.Dataset(data = Xtrain, label = ytrain)
+bst <- gpb.train(data = dtrain,
+                 nrounds = 40,
+                 learning_rate = 0.1,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 0)
+```
+
+
+```{r}
+# Verbose = 1, more output
+print("Train with verbose 1, print evaluation metric")
+bst <- gpboost(data = dtrain,
+               nrounds = 40,
+               learning_rate = 0.1,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 1)
+```
+
+
+```{r}
+
+#--------------------Basic prediction using gpboost--------------
+pred <- predict(bst, data = Xtest)
+err <- mean((ytest-pred)^2)
+print(paste("test-RMSE =", err))
+```
+
+
+```{r}
+# Compare fit to truth
+x <- seq(from=0,to=1,length.out=200)
+Xtest_plot <- cbind(x,rep(1,length(x)))
+pred_plot <- predict(bst, data = Xtest_plot)
+plot(x,f1d(x),type="l",ylim = c(-0.25,3.25), col = "red", lwd = 2,
+     main = "Comparison of true and fitted value")
+lines(x,pred_plot, col = "blue", lwd = 2)
+legend("bottomright", legend = c("truth", "fitted"),
+       lwd=2, col = c("red", "blue"), bty = "n")
+```
+
+
+
+```{r}
+#--------------------Using validation set-------------------------
+# valids is a list of gpb.Dataset, each of them is tagged with a name
+dtrain <- gpb.Dataset(data = Xtrain, label = ytrain)
+dtest <- gpb.Dataset.create.valid(dtrain, data = Xtest, label = ytest)
+valids <- list(test = dtest)
+```
+
+
+```{r}
+# To train with valids, use gpb.train, which contains more advanced features
+# valids allows us to monitor the evaluation result on all data in the list
+print("Training using gpb.train with validation data ")
+bst <- gpb.train(data = dtrain,
+                 nrounds = 100,
+                 learning_rate = 0.1,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 1,
+                 valids = valids,
+                 early_stopping_rounds = 5)
+print(paste0("Optimal number of iterations: ", bst$best_iter))
+```
+
+```{r}
+# We can change evaluation metrics, or use multiple evaluation metrics
+print("Train using gpb.train with multiple validation metrics")
+bst <- gpb.train(data = dtrain,
+                 nrounds = 100,
+                 learning_rate = 0.1,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 1,
+                 valids = valids,
+                 eval = c("l2","l1"),
+                 early_stopping_rounds = 5)
+print(paste0("Optimal number of iterations: ", bst$best_iter))
+```
+
+```{r}
+
+#--------------------Nesterov accelerated boosting-------------------------
+dtrain <- gpb.Dataset(data = Xtrain, label = ytrain)
+dtest <- gpb.Dataset.create.valid(dtrain, data = Xtest, label = ytest)
+valids <- list(test = dtest)
+print("Training using gpb.train with Nesterov acceleration")
+bst <- gpb.train(data = dtrain,
+                 nrounds = 100,
+                 learning_rate = 0.01,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 1,
+                 valids = valids,
+                 early_stopping_rounds = 5,
+                 use_nesterov_acc = TRUE)
+```
+
+
+```{r}
+# Compare fit to truth
+x <- seq(from=0,to=1,length.out=200)
+Xtest_plot <- cbind(x,rep(0,length(x)))
+pred_plot <- predict(bst, data = Xtest_plot)
+plot(x,f1d(x),type="l",ylim = c(-0.25,3.25), col = "red", lwd = 2,
+     main = "Comparison of true and fitted value")
+lines(x,pred_plot, col = "blue", lwd = 2)
+legend("bottomright", legend = c("truth", "fitted"),
+       lwd=2, col = c("red", "blue"), bty = "n")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+# fitGPModel example
+
+```{r}
+library(gpboost)
+data(GPBoost_data, package = "gpboost")
+
+df <- cbind(group_data, y) %>% as_tibble()
+df
+df %>% 
+  ggplot(aes(group1, y, group = group1)) +
+  geom_boxplot()
+```
+
+
+```{r}
+# Grouped random effects model: single-level random effect----------------
+gp_model <- fitGPModel(group_data = group_data[,1], y = y, likelihood="gaussian",
+                       params = list(std_dev = TRUE))
+summary(gp_model)
+```
+
+
+```{r}
+group_data_test
+```
+
+
+```{r}
+# Make predictions
+#pred <- predict(gp_model, group_data_pred = group_data_test[,1], predict_var = TRUE)
+group_new <- 1:50
+pred <- predict(gp_model, group_data_pred = group_new, predict_var = TRUE)
+pred$mu # Predicted mean
+pred$var # Predicted variances
+```
+
+
+```{r}
+df %>% 
+  group_by(group1) %>% 
+  summarize(mm = mean(y), vm = var(y)) %>% 
+  bind_cols(mp = pred$mu, vp = pred$var) %>% 
+  ggplot(aes(group1)) +
+  geom_point(aes(y = mm)) +
+  geom_linerange(aes(ymin = mm - sqrt(vm), ymax = mm + sqrt(vm))) +
+  geom_point(aes(x = group1 + 0.3, y = mp, color = "red")) +
+  geom_linerange(aes(x = group1 + 0.3, ymin = mp - sqrt(vp), ymax = mp + sqrt(vp)), color = "red")
+```
+
+
+```{r}
+# Also predict covariance matrix
+pred <- predict(gp_model, group_data_pred = group_data_test[,1], predict_cov_mat = TRUE)
+pred <- predict(gp_model, group_data_pred = group_new, predict_cov_mat = TRUE)
+pred$mu # Predicted mean
+pred$cov # Predicted covariance
+```
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+
+```{r}
+#--------------------Mixed effects model: random effects and linear fixed effects----------------
+X1 <- cbind(rep(1,length(y)),X) # Add intercept column
+gp_model <- fitGPModel(group_data = group_data[,1], likelihood="gaussian",
+                       y = y, X = X1, params = list(std_dev = TRUE))
+summary(gp_model)
+```
+
+
+```{r}
+#--------------------Two crossed random effects and a random slope----------------
+gp_model <- fitGPModel(group_data = group_data, likelihood="gaussian",
+                       group_rand_coef_data = X[,2],
+                       ind_effect_group_rand_coef = 1,
+                       y = y, params = list(std_dev = TRUE))
+summary(gp_model)
+```
+
+
+
+```{r}
+#--------------------Gaussian process model----------------
+gp_model <- fitGPModel(gp_coords = coords, cov_function = "exponential",
+                       likelihood="gaussian", y = y, params = list(std_dev = TRUE))
+summary(gp_model)
+# Make predictions
+pred <- predict(gp_model, gp_coords_pred = coords_test, predict_cov_mat = TRUE)
+# Predicted (posterior/conditional) mean of GP
+pred$mu
+# Predicted (posterior/conditional) covariance matrix of GP
+pred$cov
+```
+
+
+```{r}
+#--------------------Gaussian process model with linear mean function----------------
+X1 <- cbind(rep(1,length(y)),X) # Add intercept column
+gp_model <- fitGPModel(gp_coords = coords, cov_function = "exponential",
+                       likelihood="gaussian", y = y, X=X1, params = list(std_dev = TRUE))
+summary(gp_model)
+```
+
+
+```{r}
+# Gaussian process model with Vecchia approximation----------------
+gp_model <- fitGPModel(gp_coords = coords, cov_function = "exponential",
+                       vecchia_approx = TRUE, num_neighbors = 30,
+                       likelihood="gaussian", y = y)
+summary(gp_model)
+```
+
+
+```{r}
+# Gaussian process model with random coefficents----------------
+gp_model <- GPModel(gp_coords = coords, cov_function = "exponential",
+                    gp_rand_coef_data = X[,2], likelihood = "gaussian")
+fit(gp_model, y = y, params = list(std_dev = TRUE))
+summary(gp_model)
+# Alternatively, define and fit model directly using fitGPModel
+gp_model <- fitGPModel(gp_coords = coords, cov_function = "exponential",
+                       gp_rand_coef_data = X[,2], y=y,
+                       likelihood = "gaussian", params = list(std_dev = TRUE))
+summary(gp_model)
+```
+
+
+```{r}
+# Combine Gaussian process with grouped random effects----------------
+gp_model <- fitGPModel(group_data = group_data,
+                       gp_coords = coords, cov_function = "exponential",
+                       likelihood = "gaussian", y = y, params = list(std_dev = TRUE))
+summary(gp_model)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+
+```{r}
+set.seed(12)
+n <- 1000
+m <- 100
+group <- rep(1, n)
+for(i in 1:m) group[((i-1)*n/m+1):(i*n/m)] <- i
+
+b1 <-rnorm(m)
+eps <- b1[group]
+```
+
+
+```{r}
+f1d <- function(x) 1.7*(1/(1+exp(-(x-0.5)*20))+0.75*x)
+X <- matrix(runif(2*n),ncol=2)
+f <- f1d(X[,1]) # mean
+```
+
+
+```{r}
+plot(X[,1], f)
+```
+
+
+```{r}
+hist(X[,1])
+hist(X[,2])
+hist(f)
+```
+
+
+```{r}
+# Observed data
+xi <- sqrt(0.01) * rnorm(n) # simulate error term
+y <- f + eps + xi
+```
+
+
+```{r}
+plot(X[,1], y)
+```
+
+
+```{r}
+library(ggplot2)
+df <- data.frame(X, y, group)
+ggplot(df, aes(X1, y, group = group, color = group)) +
+        geom_line() #+
+        #facet_wrap(~group)
+```
+
+
+```{r}
+# Partition data into training and validation data
+train_ind <- sample.int(n, size = 0.8 * n)
+dtrain <- gpb.Dataset(data = X[train_ind,], label = y[train_ind])
+dvalid <- gpb.Dataset.create.valid(dtrain, data = X[-train_ind,], label = y[-train_ind])
+valids <- list(test = dvalid)
+```
+
+
+```{r}
+# Test data for prediction
+group_test <- rep(1:m, 2)
+x_test <- seq(from=0,to=1,length.out=m*2)
+Xtest <- cbind(x_test,rep(0,length(x_test)))
+head(Xtest)
+```
+
+
+```{r}
+# Create random effects model
+gp_model <- GPModel(group_data = group)
+
+# Train boosting with random effects model
+bst <- gpboost(data = X,
+               label = y,
+               gp_model = gp_model,
+               nrounds = 15,
+               learning_rate = 0.05,
+               max_depth = 60,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 0,
+               leaves_newton_update = FALSE)
+
+# Same thing using the gpb.train function
+# print("Training with gpb.train")
+# dataset <- gpb.Dataset(data = X, label = y)
+# bst <- gpb.train(data = dataset,
+#                  gp_model = gp_model,
+#                  nrounds = 15,
+#                  learning_rate = 0.05,
+#                  max_depth = 6,
+#                  min_data_in_leaf = 5,
+#                  objective = "regression_l2",
+#                  verbose = 0)
+
+# print("Estimated random effects model")
+summary(gp_model)
+```
+
+
+```{r}
+pred <- predict(bst, data = Xtest, group_data_pred = group_test)
+```
+
+
+```{r}
+# Compare fit to truth: random effects
+pred_random_effect <- pred$random_effect_mean
+plot(rep(b1, 2), pred_random_effect, xlab="truth", ylab="predicted",
+     main="Comparison of true and predicted random effects")
+abline(a=0,b=1)
+```
+
+
+```{r}
+# Compare fit to truth: fixed effect (mean function)
+pred_mean <- pred$fixed_effect
+x <- seq(from=0,to=1,length.out=200)
+plot(x,f1d(x),type="l",ylim = c(-0.25,3.25), col = "red", lwd = 2,
+     main = "Comparison of true and fitted value")
+points(x_test,pred_mean, col = "blue", lwd = 2)
+legend("bottomright", legend = c("truth", "fitted"),
+       lwd=2, col = c("red", "blue"), bty = "n")
+```
+
+
+```{r}
+#--------------------Using validation set-------------------------
+# Include random effect predictions for validation (=default)
+gp_model <- GPModel(group_data = group[train_ind])
+gp_model$set_prediction_data(group_data_pred = group[-train_ind])
+print("Training with validation data and use_gp_model_for_validation = TRUE ")
+bst <- gpb.train(data = dtrain,
+                 gp_model = gp_model,
+                 nrounds = 100,
+                 learning_rate = 0.05,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 1,
+                 valids = valids,
+                 early_stopping_rounds = 10,
+                 use_gp_model_for_validation = TRUE)
+print(paste0("Optimal number of iterations: ", bst$best_iter,
+             ", best test error: ", bst$best_score))
+```
+
+
+```{r}
+# Plot validation error
+val_error <- unlist(bst$record_evals$test$l2$eval)
+plot(1:length(val_error), val_error, type="l", lwd=2, col="blue",
+     xlab="iteration", ylab="Validation error", main="Validation error vs. boosting iteration")
+```
+
+```{r}
+# Do not include random effect predictions for validation (observe the higher test error)
+print("Training with validation data and use_gp_model_for_validation = FALSE")
+bst <- gpb.train(data = dtrain,
+                 gp_model = gp_model,
+                 nrounds = 100,
+                 learning_rate = 0.05,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 1,
+                 valids = valids,
+                 early_stopping_rounds = 50,
+                 use_gp_model_for_validation = FALSE)
+print(paste0("Optimal number of iterations: ", bst$best_iter,
+             ", best test error: ", bst$best_score))
+```
+
+
+```{r}
+# Plot validation error
+val_error <- unlist(bst$record_evals$test$l2$eval)
+plot(1:length(val_error), val_error, type="l", lwd=2, col="blue",
+     xlab="iteration", ylab="Validation error", main="Validation error vs. boosting iteration")
+```
+
+```{r}
+#--------------------Model interpretation----------------
+# Note: for the SHAPforxgboost package, the data matrix X needs to have column names
+# We add them first:
+X <- matrix(as.vector(X), ncol=ncol(X), dimnames=list(NULL,paste0("Covariate_",1:2)))
+gp_model <- GPModel(group_data = group, likelihood = "gaussian")
+bst <- gpboost(data = X,
+               label = y,
+               gp_model = gp_model,
+               nrounds = 15,
+               learning_rate = 0.05,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 0)
+# Calculate and plot feature importances
+feature_importances <- gpb.importance(bst, percentage = TRUE)
+gpb.plot.importance(feature_importances, top_n = 5L, measure = "Gain")
+# SHAP values and dependence plots
+library("SHAPforxgboost")
+shap.plot.summary.wrap1(bst, X = X)
+shap_long <- shap.prep(bst, X_train = X)
+shap.plot.dependence(data_long = shap_long, x = "Covariate_1",
+                     color_feature = "Covariate_2", smooth = FALSE)
+```
+
+
+```{r}
+#--------------------Saving a booster with a gp_model and loading it from a file----------------
+# Train model and make predictions
+gp_model <- GPModel(group_data = group, likelihood = "gaussian")
+bst <- gpboost(data = X,
+               label = y,
+               gp_model = gp_model,
+               nrounds = 15,
+               learning_rate = 0.05,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 0)
+pred <- predict(bst, data = Xtest, group_data_pred = group_test, predict_var= TRUE)
+# Save model to file
+filename <- tempfile(fileext = ".json")
+gpb.save(bst,filename = filename)
+# Load from file and make predictions again
+bst_loaded <- gpb.load(filename = filename)
+pred_loaded <- predict(bst_loaded, data = Xtest, group_data_pred = group_test, predict_var= TRUE)
+# Check equality
+sum(abs(pred$fixed_effect - pred_loaded$fixed_effect))
+sum(abs(pred$random_effect_mean - pred_loaded$random_effect_mean))
+sum(abs(pred$random_effect_cov - pred_loaded$random_effect_cov))
+
+```
+
+```{r}
+#--------------------Do Newton updates for tree leaves---------------
+gp_model <- GPModel(group_data = group[train_ind])
+gp_model$set_prediction_data(group_data_pred = group[-train_ind])
+print("Training with Newton updates for tree leaves")
+bst <- gpb.train(data = dtrain,
+                 gp_model = gp_model,
+                 nrounds = 100,
+                 learning_rate = 0.05,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 1,
+                 valids = valids,
+                 early_stopping_rounds = 5,
+                 use_gp_model_for_validation = TRUE,
+                 leaves_newton_update = TRUE)
+print(paste0("Optimal number of iterations: ", bst$best_iter,
+             ", best test error: ", bst$best_score))
+# Plot validation error
+val_error <- unlist(bst$record_evals$test$l2$eval)
+plot(1:length(val_error), val_error, type="l", lwd=2, col="blue",
+     xlab="iteration", ylab="Validation error", main="Validation error vs. boosting iteration")
+
+# Using gpboost function
+# bst <- gpboost(data = dtrain,
+#                gp_model = gp_model,
+#                nrounds = 1,
+#                objective = "regression_l2",
+#                verbose = 0,
+#                leaves_newton_update = TRUE)
+
+```
+
+
+
+
+```{r}
+
+#--------------------GPBoostOOS algorithm: GP parameters estimated out-of-sample----------------
+# Create random effects model and dataset
+gp_model <- GPModel(group_data = group)
+dataset <- gpb.Dataset(X, label = y)
+params <- list(learning_rate = 0.05,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2")
+# Stage 1: run cross-validation to (i) determine to optimal number of iterations
+#           and (ii) to estimate the GPModel on the out-of-sample data
+cvbst <- gpb.cv(params = params,
+                data = dataset,
+                gp_model = gp_model,
+                nrounds = 100,
+                nfold = 4,
+                eval = "l2",
+                early_stopping_rounds = 5,
+                fit_GP_cov_pars_OOS = TRUE)
+print(paste0("Optimal number of iterations: ", cvbst$best_iter))
+# Fitted model (note: ideally, one would have to find the optimal combination of 
+#               other tuning parameters such as the learning rate, tree depth, etc.)
+summary(gp_model)
+# Stage 2: Train tree-boosting model while holding the GPModel fix
+bst <- gpb.train(data = dataset,
+                 gp_model = gp_model,
+                 nrounds = cvbst$best_iter,
+                 learning_rate = 0.05,
+                 max_depth = 6,
+                 min_data_in_leaf = 5,
+                 objective = "regression_l2",
+                 verbose = 0,
+                 train_gp_model_cov_pars = FALSE)
+# The GPModel has not changed:
+summary(gp_model)
+```
+
+
+```{r}
+
+
+#--------------------Combine tree-boosting and Gaussian process model----------------
+# --------------------Simulate data----------------
+# Function for non-linear mean. Two covariates of which only one has an effect
+f1d <- function(x) 1.7*(1/(1+exp(-(x-0.5)*20))+0.75*x)
+set.seed(2)
+n <- 200 # number of samples
+X <- matrix(runif(2*n),ncol=2)
+y <- f1d(X[,1]) # mean
+# Add Gaussian process
+sigma2_1 <- 1^2 # marginal variance of GP
+rho <- 0.1 # range parameter
+sigma2 <- 0.1^2 # error variance
+coords <- cbind(runif(n),runif(n)) # locations (=features) for Gaussian process
+D <- as.matrix(dist(coords))
+Sigma <- sigma2_1*exp(-D/rho)+diag(1E-20,n)
+C <- t(chol(Sigma))
+b_1 <- rnorm(n) # simulate random effect
+eps <- C %*% b_1
+xi <- sqrt(sigma2) * rnorm(n) # simulate error term
+y <- y + eps + xi # add random effects and error to data
+
+# Create Gaussian process model
+gp_model <- GPModel(gp_coords = coords, cov_function = "exponential")
+# The default optimizer for covariance parameters (hyperparameters) is 
+# Nesterov-accelerated gradient descent.
+# This can be changed to, e.g., Nelder-Mead as follows:
+# re_params <- list(trace=TRUE, optimizer_cov="nelder_mead")
+# gp_model$set_optim_params(params=re_params)
+
+# Train model
+print("Train boosting with Gaussian process model")
+bst <- gpboost(data = X,
+               label = y,
+               gp_model = gp_model,
+               nrounds = 8,
+               learning_rate = 0.1,
+               max_depth = 6,
+               min_data_in_leaf = 5,
+               objective = "regression_l2",
+               verbose = 0)
+print("Estimated random effects model")
+summary(gp_model)
+
+# Make predictions
+set.seed(1)
+ntest <- 5
+Xtest <- matrix(runif(2*ntest),ncol=2)
+# prediction locations (=features) for Gaussian process
+coords_test <- cbind(runif(ntest),runif(ntest))/10
+pred <- predict(bst, data = Xtest, gp_coords_pred = coords_test,
+                predict_cov_mat = TRUE)
+print("Predicted (posterior) mean of GP")
+pred$random_effect_mean
+print("Predicted (posterior) covariance matrix of GP")
+pred$random_effect_cov
+print("Predicted fixed effect from tree ensemble")
+pred$fixed_effect
+```
+
+
+
+
+# lme4
+
+```{r}
+library(lme4)
+politeness = read.csv("../input/politeness_data.csv")
+```
+
+
+```{r}
+politeness
+```
+
+```{r}
+complete.cases(politeness)
+```
+
+
+
+```{r}
+boxplot(frequency ~ attitude * gender, col = c("white", "lightgray"), data = politeness)
+```
+
+```{r}
+mod_lmer <- lmer(frequency ~ attitude + (1|subject) + (1|scenario), data = politeness)
+summary(mod_lmer)
+```
+
+
+
+```{r}
+mod_lmer2 <- lmer(frequency ~ attitude + gender + (1|subject) + (1|scenario), data = politeness)
+summary(mod_lmer2)
+```
+
+
+```{r}
+AIC(mod_lmer, mod_lmer2)
+```
+
+
+```{r}
+politeness.null = lmer(frequency ~ gender +
+(1|subject) + (1|scenario), data=politeness,
+REML=FALSE)
+
+politeness.model = lmer(frequency ~ attitude +
+gender + (1|subject) + (1|scenario),
+data=politeness, REML=FALSE)
+
+anova(politeness.null,politeness.model)
+```
+
+
+
+
+
+
+# multilevel
+
+https://stats.stackexchange.com/questions/221358/how-to-deal-with-hierarchical-nested-data-in-machine-learning
+
+```{r}
+library(gpboost)
+train <- data.frame(CountryID=c(1,1,1,1, 2,2,2,2, 3,3,3,3), 
+                    RegionID=c(1,1,1,2, 3,3,4,4, 5,5,5,5), 
+                    CityID=c(1,1,2,3, 4,5,6,6, 7,7,7,8), 
+                    Age=c(23,48,62,63, 25,41,45,19, 37,41,31,50), 
+                    Gender=factor(c("M","F","M","F", "M","F","M","F", "F","F","F","M")),
+                    Income=c(31,42,71,65, 50,51,101,38, 47,50,55,23))
+# Prepare data
+X <- as.matrix(cbind(Gender=train[,"Gender"],Age=train[,"Age"]))# fixed effects data
+group_data <- train[,c("CountryID","RegionID","CityID")]# grouping data for random effects
+y <- train[,c("Income")]# response variable
+# Define a random effects model
+gp_model <- GPModel(group_data = group_data)
+# Run boosting algorithm (this will not give meaningfull results as the data is too small)
+bst <- gpboost(data = X, label = y, gp_model = gp_model, verbose = -1,
+               objective = "regression_l2",  nrounds=1000, learning_rate=0.1)
+# Show estimated variance parameters
+summary(gp_model)
+```
+
+
+```{r}
+X
+group_data
+y
+```
+
+
+```{r}
+# A linear mixed effects model also has problems with this small data and some of the variances are 0
+gp_model <- fitGPModel(group_data=group_data, y=y, X=cbind(Intercept = rep(1,length(y)),X))
+summary(gp_model)
+```
+
+
+```{r}
+# Or the same thing using the lme4 package
+library(lme4)
+mod <- lmer(Income ~ Age + Gender + (1|CountryID) + (1|RegionID) + (1|CityID), data=train, REML=FALSE)
+summary(mod)
+```
+
+
+
+
+
+
+
+
+# -----------
